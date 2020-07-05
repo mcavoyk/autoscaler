@@ -195,7 +195,6 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		NodeGroupAutoDiscovery:           *nodeGroupAutoDiscoveryFlag,
 		MaxTotalUnreadyPercentage:        *maxTotalUnreadyPercentage,
 		OkTotalUnreadyCount:              *okTotalUnreadyCount,
-		ScaleUpFromZero:                  *scaleUpFromZero,
 		EstimatorName:                    *estimatorFlag,
 		ExpanderName:                     *expanderFlag,
 		IgnoreDaemonSetsUtilization:      *ignoreDaemonSetsUtilization,
@@ -235,8 +234,6 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		Regional:                         *regional,
 		NewPodScaleUpDelay:               *newPodScaleUpDelay,
 		IgnoredTaints:                    *ignoreTaintsFlag,
-		BalancingExtraIgnoredLabels:      *balancingIgnoreLabelsFlag,
-		KubeConfigPath:                   *kubeConfigFile,
 		NodeDeletionDelayTimeout:         *nodeDeletionDelayTimeout,
 		AWSUseStaticInstanceList:         *awsUseStaticInstanceList,
 	}

@@ -798,25 +798,63 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 	findNodesToRemoveStart := time.Now()
 	// Only scheduled non expendable pods are taken into account and have to be moved.
 	nonExpendablePods := filterOutExpendablePods(pods, sd.context.ExpendablePodsPriorityCutoff)
-	// We look for only 1 node so new hints may be incomplete.
-	nodesToRemove, _, _, err := simulator.FindNodesToRemove(candidates, nodesWithoutMaster, nonExpendablePods, sd.context.ListerRegistry,
-		sd.context.PredicateChecker, sd.context.MaxNonEmptyBulkDelete, false,
-		sd.podLocationHints, sd.usageTracker, time.Now(), pdbs)
 
+	nodesToRemove := make([]simulator.NodeToBeRemoved, 0, sd.context.MaxNonEmptyBulkDelete)
+	destinations := make([]*apiv1.Node, len(nodesWithoutMaster))
+	destinations = append(destinations, nodesWithoutMaster...)
+
+	for {
+		checkNodesToRemove, _, _, err := simulator.FindNodesToRemove(
+			candidates,
+			destinations,
+			nonExpendablePods,
+			sd.context.ListerRegistry,
+			sd.context.PredicateChecker,
+			1,
+			false,
+			sd.podLocationHints,
+			sd.usageTracker,
+			time.Now(),
+			pdbs)
+
+		if err != nil {
+			scaleDownStatus.Result = status.ScaleDownError
+			return scaleDownStatus, err.AddPrefix("Find node to remove failed: ")
+		}
+
+		nodesToRemove = append(nodesToRemove, checkNodesToRemove...)
+		if len(nodesToRemove) >= sd.context.MaxNonEmptyBulkDelete || len(checkNodesToRemove) == 0 {
+			break
+		}
+
+		// Remove nodeToBeRemoved from destination list
+		removeFromDestionation := checkNodesToRemove[0].Node.Name
+		for i, destination := range destinations {
+			if destination.Name == removeFromDestionation {
+				destinations[i] = destinations[len(destinations)-1]
+				destinations[len(destinations)-1] = nil
+				destinations = destinations[:len(destinations)-1]
+				break
+			}
+		}
+	}
 	findNodesToRemoveDuration = time.Now().Sub(findNodesToRemoveStart)
 
-	if err != nil {
-		scaleDownStatus.Result = status.ScaleDownError
-		return scaleDownStatus, err.AddPrefix("Find node to remove failed: ")
-	}
 	if len(nodesToRemove) == 0 {
 		klog.V(1).Infof("No node to remove")
 		scaleDownStatus.Result = status.ScaleDownNoNodeDeleted
 		return scaleDownStatus, nil
 	}
 
+	klog.V(1).Infof("Found %d nodes to remove", len(nodesToRemove))
 	statusNodes := make([]*apiv1.Node, 0, len(nodesToRemove))
 	statusPods := make(map[string][]*apiv1.Pod, len(nodesToRemove))
+
+	// Starting deletion.
+	nodeDeletionStart := time.Now()
+	nodeDeletionDuration = time.Now().Sub(nodeDeletionStart)
+	sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(true)
+
 	for i := range nodesToRemove {
 		toRemove := nodesToRemove[i]
 		utilization := sd.nodeUtilizationMap[toRemove.Node.Name]
@@ -831,11 +869,6 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 
 		// Nothing super-bad should happen if the node is removed from tracker prematurely.
 		simulator.RemoveNodeFromTracker(sd.usageTracker, toRemove.Node.Name, sd.unneededNodes)
-		nodeDeletionStart := time.Now()
-
-		// Starting deletion.
-		nodeDeletionDuration = time.Now().Sub(nodeDeletionStart)
-		sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(true)
 
 		go func(remove simulator.NodeToBeRemoved) {
 			// Finishing the delete process once this goroutine is over.
