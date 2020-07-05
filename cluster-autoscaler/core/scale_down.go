@@ -800,8 +800,9 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 	nonExpendablePods := filterOutExpendablePods(pods, sd.context.ExpendablePodsPriorityCutoff)
 	// We look for only 1 node so new hints may be incomplete.
 	nodesToRemove, _, _, err := simulator.FindNodesToRemove(candidates, nodesWithoutMaster, nonExpendablePods, sd.context.ListerRegistry,
-		sd.context.PredicateChecker, 1, false,
+		sd.context.PredicateChecker, sd.context.MaxNonEmptyBulkDelete, false,
 		sd.podLocationHints, sd.usageTracker, time.Now(), pdbs)
+
 	findNodesToRemoveDuration = time.Now().Sub(findNodesToRemoveStart)
 
 	if err != nil {
@@ -813,49 +814,57 @@ func (sd *ScaleDown) TryToScaleDown(allNodes []*apiv1.Node, pods []*apiv1.Pod, p
 		scaleDownStatus.Result = status.ScaleDownNoNodeDeleted
 		return scaleDownStatus, nil
 	}
-	toRemove := nodesToRemove[0]
-	utilization := sd.nodeUtilizationMap[toRemove.Node.Name]
-	podNames := make([]string, 0, len(toRemove.PodsToReschedule))
-	for _, pod := range toRemove.PodsToReschedule {
-		podNames = append(podNames, pod.Namespace+"/"+pod.Name)
+
+	statusNodes := make([]*apiv1.Node, 0, len(nodesToRemove))
+	statusPods := make(map[string][]*apiv1.Pod, len(nodesToRemove))
+	for i := range nodesToRemove {
+		toRemove := nodesToRemove[i]
+		utilization := sd.nodeUtilizationMap[toRemove.Node.Name]
+		podNames := make([]string, 0, len(toRemove.PodsToReschedule))
+		for _, pod := range toRemove.PodsToReschedule {
+			podNames = append(podNames, pod.Namespace+"/"+pod.Name)
+		}
+		klog.V(0).Infof("Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", toRemove.Node.Name, utilization,
+			strings.Join(podNames, ","))
+		sd.context.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: removing node %s, utilization: %v, pods to reschedule: %s",
+			toRemove.Node.Name, utilization, strings.Join(podNames, ","))
+
+		// Nothing super-bad should happen if the node is removed from tracker prematurely.
+		simulator.RemoveNodeFromTracker(sd.usageTracker, toRemove.Node.Name, sd.unneededNodes)
+		nodeDeletionStart := time.Now()
+
+		// Starting deletion.
+		nodeDeletionDuration = time.Now().Sub(nodeDeletionStart)
+		sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(true)
+
+		go func(remove simulator.NodeToBeRemoved) {
+			// Finishing the delete process once this goroutine is over.
+			var result status.NodeDeleteResult
+			defer func() { sd.nodeDeletionTracker.AddNodeDeleteResult(remove.Node.Name, result) }()
+			defer sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(false)
+			nodeGroup, found := candidateNodeGroups[remove.Node.Name]
+			if !found {
+				result = status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToDelete, Err: errors.NewAutoscalerError(
+					errors.InternalError, "failed to find node group for %s", remove.Node.Name)}
+				return
+			}
+			result = sd.deleteNode(remove.Node, remove.PodsToReschedule, nodeGroup)
+			if result.ResultType != status.NodeDeleteOk {
+				klog.Errorf("Failed to delete %s: %v", remove.Node.Name, result.Err)
+				return
+			}
+			if readinessMap[remove.Node.Name] {
+				metrics.RegisterScaleDown(1, gpu.GetGpuTypeForMetrics(gpuLabel, availableGPUTypes, remove.Node, nodeGroup), metrics.Underutilized)
+			} else {
+				metrics.RegisterScaleDown(1, gpu.GetGpuTypeForMetrics(gpuLabel, availableGPUTypes, remove.Node, nodeGroup), metrics.Unready)
+			}
+		}(toRemove)
+
+		statusNodes = append(statusNodes, toRemove.Node)
+		statusPods[toRemove.Node.Name] = toRemove.PodsToReschedule
 	}
-	klog.V(0).Infof("Scale-down: removing node %s, utilization: %v, pods to reschedule: %s", toRemove.Node.Name, utilization,
-		strings.Join(podNames, ","))
-	sd.context.LogRecorder.Eventf(apiv1.EventTypeNormal, "ScaleDown", "Scale-down: removing node %s, utilization: %v, pods to reschedule: %s",
-		toRemove.Node.Name, utilization, strings.Join(podNames, ","))
 
-	// Nothing super-bad should happen if the node is removed from tracker prematurely.
-	simulator.RemoveNodeFromTracker(sd.usageTracker, toRemove.Node.Name, sd.unneededNodes)
-	nodeDeletionStart := time.Now()
-
-	// Starting deletion.
-	nodeDeletionDuration = time.Now().Sub(nodeDeletionStart)
-	sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(true)
-
-	go func() {
-		// Finishing the delete process once this goroutine is over.
-		var result status.NodeDeleteResult
-		defer func() { sd.nodeDeletionTracker.AddNodeDeleteResult(toRemove.Node.Name, result) }()
-		defer sd.nodeDeletionTracker.SetNonEmptyNodeDeleteInProgress(false)
-		nodeGroup, found := candidateNodeGroups[toRemove.Node.Name]
-		if !found {
-			result = status.NodeDeleteResult{ResultType: status.NodeDeleteErrorFailedToDelete, Err: errors.NewAutoscalerError(
-				errors.InternalError, "failed to find node group for %s", toRemove.Node.Name)}
-			return
-		}
-		result = sd.deleteNode(toRemove.Node, toRemove.PodsToReschedule, nodeGroup)
-		if result.ResultType != status.NodeDeleteOk {
-			klog.Errorf("Failed to delete %s: %v", toRemove.Node.Name, result.Err)
-			return
-		}
-		if readinessMap[toRemove.Node.Name] {
-			metrics.RegisterScaleDown(1, gpu.GetGpuTypeForMetrics(gpuLabel, availableGPUTypes, toRemove.Node, nodeGroup), metrics.Underutilized)
-		} else {
-			metrics.RegisterScaleDown(1, gpu.GetGpuTypeForMetrics(gpuLabel, availableGPUTypes, toRemove.Node, nodeGroup), metrics.Unready)
-		}
-	}()
-
-	scaleDownStatus.ScaledDownNodes = sd.mapNodesToStatusScaleDownNodes([]*apiv1.Node{toRemove.Node}, candidateNodeGroups, map[string][]*apiv1.Pod{toRemove.Node.Name: toRemove.PodsToReschedule})
+	scaleDownStatus.ScaledDownNodes = sd.mapNodesToStatusScaleDownNodes(statusNodes, candidateNodeGroups, statusPods)
 	scaleDownStatus.Result = status.ScaleDownNodeDeleteStarted
 	return scaleDownStatus, nil
 }
