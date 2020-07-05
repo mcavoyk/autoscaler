@@ -130,6 +130,7 @@ var (
 	maxBulkSoftTaintCount      = flag.Int("max-bulk-soft-taint-count", 10, "Maximum number of nodes that can be tainted/untainted PreferNoSchedule at the same time. Set to 0 to turn off such tainting.")
 	maxBulkSoftTaintTime       = flag.Duration("max-bulk-soft-taint-time", 3*time.Second, "Maximum duration of tainting/untainting nodes as PreferNoSchedule at the same time.")
 	maxEmptyBulkDeleteFlag     = flag.Int("max-empty-bulk-delete", 10, "Maximum number of empty nodes that can be deleted at the same time.")
+	maxNonEmptyBulkDeleteFlag  = flag.Int("max-non-empty-bulk-delete", 1, "Maximum number of non-empty nodes that can be removed at the same time")
 	maxGracefulTerminationFlag = flag.Int("max-graceful-termination-sec", 10*60, "Maximum number of seconds CA waits for pod termination when trying to scale down a node.")
 	maxTotalUnreadyPercentage  = flag.Float64("max-total-unready-percentage", 45, "Maximum percentage of unready nodes in the cluster.  After this is exceeded, CA halts operations")
 	okTotalUnreadyCount        = flag.Int("ok-total-unready-count", 3, "Number of allowed unready nodes, irrespective of max-total-unready-percentage")
@@ -206,6 +207,7 @@ func createAutoscalingOptions() config.AutoscalingOptions {
 		MaxBulkSoftTaintCount:            *maxBulkSoftTaintCount,
 		MaxBulkSoftTaintTime:             *maxBulkSoftTaintTime,
 		MaxEmptyBulkDelete:               *maxEmptyBulkDeleteFlag,
+		MaxNonEmptyBulkDelete:            *maxNonEmptyBulkDeleteFlag,
 		MaxGracefulTerminationSec:        *maxGracefulTerminationFlag,
 		MaxNodeProvisionTime:             *maxNodeProvisionTime,
 		MaxNodesTotal:                    *maxNodesTotal,
